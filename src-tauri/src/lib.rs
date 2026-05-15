@@ -4,12 +4,12 @@ mod models;
 mod state;
 
 use commands::{
-    files::{importar_archivo, listar_archivos},
+    files::{import_path, list_files},
     instances::{
-        abrir_carpeta_instancia, crear_instancia, eliminar_instancia, listar_instancias,
-        obtener_versiones,
+        open_instance_folder, create_instance, delete_instance, list_instances,
+        get_versions,
     },
-    launcher::iniciar_pipeline_dinamico,
+    launcher::launch_instance,
 };
 use state::GameState;
 use tauri::Manager;
@@ -22,26 +22,26 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .manage(GameState::new())
         .invoke_handler(tauri::generate_handler![
-            obtener_versiones,
-            crear_instancia,
-            listar_instancias,
-            eliminar_instancia,
-            abrir_carpeta_instancia,
-            listar_archivos,
-            importar_archivo,
-            iniciar_pipeline_dinamico,
+            get_versions,
+            create_instance,
+            list_instances,
+            delete_instance,
+            open_instance_folder,
+            list_files,
+            import_path,
+            launch_instance,
         ])
         .build(tauri::generate_context!())
-        .expect("Error al iniciar IsoCraft")
+        .expect("Error starting IsoCraft")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
-                // Matar todos los juegos activos al cerrar el launcher
+                // Kill all active games when closing the launcher
                 let state = app_handle.state::<GameState>();
                 let mut guard = state.child_processes.lock().unwrap();
                 for (name, child_arc) in guard.drain() {
                     let mut child = child_arc.lock().unwrap();
                     let _ = child.kill();
-                    println!("[IsoCraft] Proceso '{}' terminado por cierre del launcher", name);
+                    println!("[IsoCraft] Process '{}' terminated due to launcher exit", name);
                 }
             }
         });

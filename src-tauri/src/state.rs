@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Estado global compartido por todos los comandos Tauri.
-/// Mantiene un mapa de procesos activos de Minecraft por nombre de instancia.
+/// Global state shared across all Tauri commands.
+/// Maintains a map of active Minecraft child processes by instance name.
 pub struct GameState {
     pub child_processes: Mutex<HashMap<String, Arc<Mutex<std::process::Child>>>>,
 }

@@ -1,56 +1,29 @@
 use futures_util::StreamExt;
 use std::io::Write;
-use tauri::{AppHandle, Manager, Emitter};
+use crate::models::DownloadInfo;
+use crate::launcher::context::LauncherContext;
 
-use crate::models::{DownloadInfo, ProgressPayload};
-
-/// Descarga el JAR del cliente de Minecraft si no está en caché.
-/// Se almacena en `<appDataDir>/versions/<version_id>/<version_id>.jar`.
-pub async fn asegurar_juego(
-    app: &AppHandle,
+/// Downloads the official Minecraft client JAR if not cached.
+pub async fn ensure_game_jar(
+    ctx: &LauncherContext,
     version_id: &str,
     download_info: &DownloadInfo,
-    instance_name: &str,
 ) -> Result<String, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let version_dir = app_data_dir.join("versions").join(version_id);
+    let version_dir = ctx.paths.root.join("versions").join(version_id);
     let jar_path = version_dir.join(format!("{}.jar", version_id));
 
     if jar_path.exists() {
-        app.emit(
-            "jre-progress",
-            ProgressPayload {
-                instance_name: instance_name.to_string(),
-                progress: 100,
-                message: format!("Minecraft {} ya está en caché.", version_id),
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        ctx.emit_progress(100, &format!("Minecraft {} ready.", version_id));
         return Ok(jar_path.to_string_lossy().to_string());
     }
 
     std::fs::create_dir_all(&version_dir).map_err(|e| e.to_string())?;
 
-    app.emit(
-        "jre-progress",
-        ProgressPayload {
-            instance_name: instance_name.to_string(),
-            progress: 0,
-            message: format!("Descargando cliente Minecraft {}...", version_id),
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    ctx.emit_progress(0, &format!("Downloading official client {}...", version_id));
 
-    let resp = reqwest::get(&download_info.url)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        return Err(format!(
-            "Fallo al descargar Minecraft {} (HTTP {})",
-            version_id,
-            resp.status()
-        ));
+    let resp = ctx.client.get(&download_info.url).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() { 
+        return Err(format!("Error downloading Minecraft (HTTP {})", resp.status())); 
     }
 
     let mut file = std::fs::File::create(&jar_path).map_err(|e| e.to_string())?;
@@ -62,16 +35,8 @@ pub async fn asegurar_juego(
         file.write_all(&chunk).map_err(|e| e.to_string())?;
         downloaded += chunk.len() as u64;
 
-        let progress = (downloaded as f64 / download_info.size as f64 * 100.0) as u32;
-        app.emit(
-            "jre-progress",
-            ProgressPayload {
-                instance_name: instance_name.to_string(),
-                progress,
-                message: format!("Minecraft {} → {}%", version_id, progress),
-            },
-        )
-        .map_err(|e| e.to_string())?;
+        let pct = (downloaded as f64 / download_info.size as f64 * 100.0) as u32;
+        ctx.emit_progress(pct, &format!("Downloading Minecraft... {}%", pct));
     }
 
     Ok(jar_path.to_string_lossy().to_string())

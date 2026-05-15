@@ -2,272 +2,294 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager, Emitter};
 
-use crate::launcher::{args, assets, game, jre, libraries, natives};
-use crate::models::{GameLaunchPayload, InstanceConfig, ProgressPayload};
+use crate::launcher::{args, assets, game, jre, libraries, natives, warnings, context::LauncherContext, managers};
+use crate::models::{GameLaunchPayload, InstanceConfig};
 use crate::state::GameState;
 
-/// Pipeline completo de lanzamiento para una instancia:
-/// manifiesto → JRE → cliente → assets → librerías → natives → spawn.
+/// Clean, decoupled, and Context-oriented launch pipeline.
 #[tauri::command]
-pub async fn iniciar_pipeline_dinamico(
+pub async fn launch_instance(
     app: AppHandle,
     instance_name: String,
 ) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    // 1. Create Context (The launch backpack)
+    let ctx = LauncherContext::new(app, instance_name.clone())?;
+    let config_path = ctx.instance_config_path();
 
-    // ── Leer configuración de la instancia ────────────────────────────────────
-    let instance_dir = app_data_dir.join("instances").join(&instance_name);
-    let config_path = instance_dir.join("instance.json");
+    // 2. Read Configuration
     let config_content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("No se pudo leer '{}': {}", instance_name, e))?;
+        .map_err(|e| format!("Could not read config: {}", e))?;
     let mut instance_config: InstanceConfig =
-        serde_json::from_str(&config_content).map_err(|e| format!("Config inválida: {}", e))?;
+        serde_json::from_str(&config_content).map_err(|e| format!("Invalid config: {}", e))?;
 
-    let usuario = instance_config.username.clone();
-    let version_id = instance_config.version_id.clone();
-    let max_memory = instance_config.max_memory.clone();
+    println!("[IsoCraft] 🚀 Launching: {} ({})", ctx.instance_name, instance_config.version_id);
 
-    println!(
-        "[IsoCraft] Lanzando '{}' → {} (usuario: {})",
-        instance_name, version_id, usuario
-    );
-
-    emit_progress(&app, &instance_name, 5, "Descargando manifiesto de versión...")?;
-
-    // ── a) Manifiesto Mojang ──────────────────────────────────────────────────
-    let manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-    let manifest: serde_json::Value = reqwest::get(manifest_url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let version_url = manifest["versions"]
-        .as_array()
-        .ok_or("Manifiesto inválido")?
-        .iter()
-        .find(|v| v["id"].as_str() == Some(&version_id))
-        .and_then(|v| v["url"].as_str())
-        .ok_or("Versión no encontrada en el manifiesto")?;
-
-    // ── b) Detalle de versión ─────────────────────────────────────────────────
-    emit_progress(&app, &instance_name, 10, "Descargando detalles de versión...")?;
-    let detail: crate::models::VersionDetail = reqwest::get(version_url)
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let java_major = detail
-        .java_version
-        .as_ref()
-        .map(|j| j.major_version)
-        .unwrap_or(8);
-
-    // ── c) JRE ────────────────────────────────────────────────────────────────
-    emit_progress(&app, &instance_name, 15, "Verificando JRE...")?;
-    let ruta_jre = jre::asegurar_jre(&app, java_major, &instance_name).await?;
-
-    // ── d) Cliente Minecraft ──────────────────────────────────────────────────
-    emit_progress(&app, &instance_name, 50, "Verificando cliente Minecraft...")?;
-    let ruta_jar =
-        game::asegurar_juego(&app, &version_id, &detail.downloads.client, &instance_name).await?;
-
-    // ── e) Assets ─────────────────────────────────────────────────────────────
-    emit_progress(&app, &instance_name, 60, "Verificando assets...")?;
-    let assets_dir = if let Some(ref ai) = detail.asset_index {
-        assets::asegurar_assets(&app, ai, &instance_name).await?
-    } else {
-        app_data_dir.join("assets").to_string_lossy().to_string()
-    };
-
-    // Soporte para recursos legacy (MC ≤1.6): copiar/linkear a instancia
-    let global_resources = app_data_dir.join("resources");
-    if global_resources.exists() {
-        let instance_resources = instance_dir.join("resources");
-        let _ = args::enlazar_o_copiar_recursos(&global_resources, &instance_resources);
+    // Check for known issues with this version on the current platform
+    if let Some(warning) = warnings::get_launch_warning(&instance_config.version_id) {
+        let _ = ctx.app.emit("launch-warning", serde_json::json!({
+            "instance_name": ctx.instance_name,
+            "version_id": instance_config.version_id,
+            "message": warning
+        }));
     }
 
-    // ── f) Librerías ──────────────────────────────────────────────────────────
-    emit_progress(&app, &instance_name, 70, "Descargando librerías...")?;
-    let mut classpath_parts =
-        libraries::asegurar_librerias(&app, &detail.libraries, &instance_name).await?;
-    classpath_parts.push(ruta_jar);
+    // 3. Resolve Manifest
+    ctx.emit_progress(5, "Resolving manifest...");
+    let vanilla_manifest = fetch_vanilla_manifest(&ctx, &instance_config.version_id).await?;
+    let manager = managers::get_manager(&instance_config.loader);
+    let detail = manager.resolve_manifest(&instance_config.version_id, &instance_config.loader_version, vanilla_manifest, &ctx).await?;
 
-    #[cfg(target_os = "windows")]
-    let sep = ";";
-    #[cfg(not(target_os = "windows"))]
-    let sep = ":";
-    let classpath_final = classpath_parts.join(sep);
 
-    // ── g) Natives ────────────────────────────────────────────────────────────
-    emit_progress(&app, &instance_name, 85, "Extrayendo natives...")?;
-    let natives_dir =
-        natives::asegurar_natives(&app, &detail.libraries, &instance_dir).await?;
 
-    // ── h) Binario java ───────────────────────────────────────────────────────
-    let java_exe = args::get_java_executable(&ruta_jre)?;
-    println!("[IsoCraft] Java: {}", java_exe);
 
-    emit_progress(&app, &instance_name, 95, "Construyendo comando de lanzamiento...")?;
+    let java_major = detail.java_version.as_ref().map(|j| j.major_version).unwrap_or(8);
 
-    // ── i) Placeholders ───────────────────────────────────────────────────────
-    let game_dir_str = instance_dir.to_string_lossy().to_string();
-    let asset_index_id = detail
-        .assets
-        .as_deref()
-        .unwrap_or(&version_id)
-        .to_string();
+    // 4. Prepare Dependencies (JRE, Client, Assets, Libraries)
+    ctx.emit_progress(15, "Checking JRE...");
+    let jre_path = jre::ensure_jre(&ctx, java_major).await?;
 
-    let mut ph: HashMap<String, String> = HashMap::new();
-    ph.insert("auth_player_name".into(), usuario.clone());
-    ph.insert("version_name".into(), version_id.clone());
-    ph.insert("game_directory".into(), game_dir_str.clone());
-    ph.insert("assets_root".into(), assets_dir.clone());
-    ph.insert("assets_index_name".into(), asset_index_id.clone());
+    ctx.emit_progress(40, "Checking client...");
+    let jar_path = if let Some(ref downloads) = detail.downloads {
+        game::ensure_game_jar(&ctx, &instance_config.version_id, &downloads.client).await?
+    } else {
+        // Fallback: use the vanilla JAR path
+        ctx.paths.root.join("versions").join(&instance_config.version_id).join(format!("{}.jar", instance_config.version_id)).to_string_lossy().to_string()
+    };
+
+    ctx.emit_progress(60, "Checking assets...");
+    let assets_dir = assets::ensure_assets(&ctx, detail.asset_index.as_ref().ok_or("No asset index")?).await?;
+
+    ctx.emit_progress(80, "Downloading libraries...");
+    let mut classpath_parts = libraries::ensure_libraries(&ctx, &detail.libraries).await?;
+    classpath_parts.push(jar_path.clone());
+
+    // Deduplicate by exact file path — prevents "Duplicate key" errors in Forge's
+    // UnionFileSystem when the same physical JAR is referenced from multiple sources.
+    let mut seen = std::collections::HashSet::new();
+    classpath_parts.retain(|p| seen.insert(p.clone()));
+
+    // Classpath will be built after reordering in step 6
+
+    // 5. Natives
+    #[cfg(target_os = "macos")]
+    let is_modern = detail.arguments.is_some();
+
+    let natives_dir = if cfg!(target_os = "macos") && is_modern {
+        // For modern macOS, we rely on LWJGL internal extraction from classpath
+        println!("[IsoCraft] 🍎 Modern macOS detected: Using internal LWJGL native loading.");
+        "".to_string()
+    } else {
+        ctx.emit_progress(90, "Extracting natives...");
+        natives::ensure_natives(&ctx, &detail.libraries).await?
+    };
+
+    // 6. Build Command
+    let java_exe = args::get_java_executable(&jre_path)?;
+    println!("[IsoCraft] ☕ Using Java: {}", java_exe);
+
+    let instance_dir = ctx.instance_dir();
+    
+    // FIX: Create a short-path symlink to bypass macOS snprintf crashes
+    #[cfg(target_os = "macos")]
+    let short_base = {
+        let symlink_path = std::path::Path::new("/tmp/isocraft_link");
+        let target = &ctx.paths.root;
+        if !symlink_path.exists() {
+            let _ = std::os::unix::fs::symlink(target, symlink_path);
+        }
+        symlink_path.to_string_lossy().to_string()
+    };
+
+    let mut final_classpath = vec![jar_path.clone()];
+    final_classpath.extend(classpath_parts);
+    
+    let mut classpath_string = final_classpath.join(if cfg!(target_os = "windows") { ";" } else { ":" });
+    
+    // Shorten the classpath string using the symlink on macOS
+    #[cfg(target_os = "macos")]
+    {
+        let real_base = ctx.paths.root.to_string_lossy().to_string();
+        classpath_string = classpath_string.replace(&real_base, &short_base);
+    }
+
+    // 6. Build Command
+    let mut java_exe = args::get_java_executable(&jre_path)?;
+    let mut instance_dir_str = instance_dir.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    {
+        let real_base = ctx.paths.root.to_string_lossy().to_string();
+        java_exe = java_exe.replace(&real_base, &short_base);
+        instance_dir_str = instance_dir_str.replace(&real_base, &short_base);
+    }
+    
+    println!("[IsoCraft] ☕ Using Java (Short Path): {}", java_exe);
+
+    // FIX: Use an argument file (@argfile)
+    let arg_file_path = instance_dir.join("launch_args.txt");
+    let arg_file_content = format!("-classpath\n{}", classpath_string);
+    std::fs::write(&arg_file_path, arg_file_content).map_err(|e| format!("Failed to write argfile: {}", e))?;
+
+    let ph = build_placeholders(&instance_config, &detail, &ctx, &instance_dir, &assets_dir, &natives_dir, &jar_path, &classpath_string);
+
+    let mut cmd = Command::new(&java_exe);
+    cmd.current_dir(std::path::Path::new(&instance_dir_str));
+
+    #[cfg(target_os = "macos")]
+    {
+        // Minimal set for macOS
+        cmd.arg("-XstartOnFirstThread");
+        cmd.arg("--enable-native-access=ALL-UNNAMED");
+        cmd.arg("-Djna.nosys=true");
+        
+        // Clean environment of Tauri/Vite garbage to save buffer space
+        cmd.env_clear();
+        // Restore ONLY essential vars
+        if let Ok(path) = std::env::var("PATH") { cmd.env("PATH", path); }
+        if let Ok(home) = std::env::var("HOME") { cmd.env("HOME", home); }
+        if let Ok(user) = std::env::var("USER") { cmd.env("USER", user); }
+    }
+
+    // Use the @argfile
+    let mut arg_file_arg = arg_file_path.to_string_lossy().to_string();
+    #[cfg(target_os = "macos")]
+    {
+        let real_base = ctx.paths.root.to_string_lossy().to_string();
+        arg_file_arg = arg_file_arg.replace(&real_base, &short_base);
+    }
+    cmd.arg(format!("@{}", arg_file_arg));
+
+    if let Some(ref arguments) = detail.arguments {
+        for arg in args::resolve_argument_list(&arguments.jvm, &ph) {
+            // Skip ALL native-related properties on macOS
+            if cfg!(target_os = "macos") {
+                if arg.starts_with("-Djava.library.path=") || 
+                   arg.starts_with("-Dorg.lwjgl.system.SharedLibraryExtractPath=") ||
+                   arg.starts_with("-Djna.tmpdir=") ||
+                   arg.starts_with("-Dio.netty.native.workdir=") {
+                    continue;
+                }
+            }
+            cmd.arg(arg);
+        }
+        manager.apply_launch_patches(&ctx, &mut cmd, &detail, &ph).await?;
+        cmd.arg(format!("-Xmx{}", instance_config.max_memory));
+        cmd.arg(&detail.main_class);
+        for arg in args::resolve_argument_list(&arguments.game, &ph) { cmd.arg(arg); }
+    } else {
+        // Legacy path
+        cmd.arg(format!("-Xmx{}", instance_config.max_memory));
+        cmd.arg(&detail.main_class);
+        if let Some(ref mc_args) = detail.minecraft_arguments {
+             for token in mc_args.split_whitespace() {
+                cmd.arg(args::substitute_placeholders(token, &ph));
+            }
+        }
+    }
+
+    // 7. Execution
+    println!("[IsoCraft] 🛠️ Launching with ArgFile: @{}", arg_file_path.display());
+    let child = cmd.spawn().map_err(|e| format!("Error starting Java: {}", e))?;
+    let pid = child.id();
+    let child_arc = Arc::new(Mutex::new(child));
+
+    register_process(&ctx.app, &ctx.instance_name, child_arc.clone());
+    update_instance(&config_path, &mut instance_config)?;
+
+    let _ = ctx.app.emit("game-launched", GameLaunchPayload {
+        instance_name: ctx.instance_name.clone(),
+        pid,
+        info: format!("IsoCraft: {} started (PID {})", ctx.instance_name, pid),
+    });
+
+    monitor_process(ctx.app, ctx.instance_name, child_arc);
+
+    Ok(())
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+async fn fetch_vanilla_manifest(ctx: &LauncherContext, version_id: &str) -> Result<serde_json::Value, String> {
+    let manifest_url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+    let manifest: serde_json::Value = ctx.client.get(manifest_url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())?;
+    let version_url = manifest["versions"].as_array().ok_or("Invalid manifest")?
+        .iter().find(|v| v["id"].as_str() == Some(version_id))
+        .and_then(|v| v["url"].as_str()).ok_or("Version not found")?;
+    ctx.client.get(version_url).send().await.map_err(|e| e.to_string())?.json().await.map_err(|e| e.to_string())
+}
+
+fn build_placeholders(
+    config: &InstanceConfig,
+    detail: &crate::models::VersionDetail,
+    ctx: &LauncherContext,
+    instance_dir: &std::path::Path,
+    assets_dir: &str,
+    natives_dir: &str,
+    jar_path: &str,
+    classpath: &str,
+) -> HashMap<String, String> {
+    let mut ph = HashMap::new();
+    ph.insert("auth_player_name".into(), config.username.clone());
+    ph.insert("version_name".into(), config.version_id.clone());
+    ph.insert("game_directory".into(), instance_dir.to_string_lossy().to_string());
+    ph.insert("assets_root".into(), assets_dir.to_string());
+    ph.insert("assets_index_name".into(), detail.assets.as_deref().unwrap_or(&config.version_id).to_string());
     ph.insert("auth_uuid".into(), "00000000-0000-0000-0000-000000000000".into());
     ph.insert("auth_access_token".into(), "0".into());
     ph.insert("user_properties".into(), "{}".into());
     ph.insert("user_type".into(), "legacy".into());
     ph.insert("version_type".into(), "release".into());
-    ph.insert("natives_directory".into(), natives_dir.clone());
+    ph.insert("natives_directory".into(), natives_dir.to_string());
     ph.insert("launcher_name".into(), "IsoCraft".into());
     ph.insert("launcher_version".into(), "1.0".into());
-    ph.insert("classpath".into(), classpath_final.clone());
+    ph.insert("library_directory".into(), ctx.paths.libraries.to_string_lossy().to_string());
+    ph.insert("minecraft_jar".into(), jar_path.to_string());
+    ph.insert("classpath".into(), classpath.to_string());
     ph.insert("resolution_width".into(), "854".into());
     ph.insert("resolution_height".into(), "480".into());
+    ph.insert("clientid".into(), "0".into());
+    ph.insert("auth_xuid".into(), "0".into());
+    ph.insert("xuid".into(), "0".into());
+    
+    // Forge specific placeholders
+    #[cfg(target_os = "windows")]
+    ph.insert("classpath_separator".into(), ";".into());
+    #[cfg(not(target_os = "windows"))]
+    ph.insert("classpath_separator".into(), ":".into());
 
-    // ── j) Construir comando ──────────────────────────────────────────────────
-    let mut cmd = Command::new(&java_exe);
+    ph
+}
 
-    // macOS: -XstartOnFirstThread solo para LWJGL 3
-    #[cfg(target_os = "macos")]
-    {
-        let uses_lwjgl3 = detail
-            .libraries
-            .iter()
-            .any(|l| l.name.starts_with("org.lwjgl:") && !l.name.starts_with("org.lwjgl.lwjgl:"));
-        if uses_lwjgl3 {
-            cmd.arg("-XstartOnFirstThread");
-            println!("[IsoCraft] LWJGL 3 → -XstartOnFirstThread");
-        } else {
-            println!("[IsoCraft] LWJGL 2 → sin -XstartOnFirstThread");
-        }
+fn register_process(app: &AppHandle, name: &str, child: Arc<Mutex<std::process::Child>>) {
+    let state = app.state::<GameState>();
+    let mut guard = state.child_processes.lock().unwrap();
+    if let Some(old) = guard.insert(name.to_string(), child) {
+        let _ = old.lock().unwrap().kill();
     }
+}
 
-    if let Some(ref arguments) = detail.arguments {
-        // Formato moderno (MC ≥1.13)
-        for arg in args::resolve_argument_list(&arguments.jvm, &ph) {
-            cmd.arg(arg);
-        }
-        cmd.arg(format!("-Xmx{}", max_memory));
-        cmd.arg(&detail.main_class);
-        for arg in args::resolve_argument_list(&arguments.game, &ph) {
-            cmd.arg(arg);
-        }
-    } else if let Some(ref mc_args) = detail.minecraft_arguments {
-        // Formato legacy (MC ≤1.12.2)
-        cmd.arg(format!("-Xmx{}", max_memory));
-        cmd.arg(format!("-Djava.library.path={}", natives_dir));
-        cmd.arg("-cp");
-        cmd.arg(&classpath_final);
-        cmd.arg(&detail.main_class);
-        for token in mc_args.split_whitespace() {
-            cmd.arg(args::substitute_placeholders(token, &ph));
-        }
-    } else {
-        return Err("El JSON de versión no contiene ni 'arguments' ni 'minecraftArguments'".into());
-    }
+fn update_instance<P: AsRef<std::path::Path>>(path: P, config: &mut InstanceConfig) -> Result<(), String> {
+    config.last_played = Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs().to_string());
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())
+}
 
-    cmd.current_dir(&instance_dir);
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Fallo al iniciar Java: {}", e))?;
-    let pid = child.id();
-    let child_arc = Arc::new(Mutex::new(child));
-
-    // Registrar proceso activo
-    {
-        let state = app.state::<GameState>();
-        let mut guard = state.child_processes.lock().unwrap();
-        if let Some(old) = guard.insert(instance_name.clone(), child_arc.clone()) {
-            let mut old_child = old.lock().unwrap();
-            let _ = old_child.kill();
-        }
-    }
-
-    // Actualizar last_played
-    instance_config.last_played = Some(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-            .to_string(),
-    );
-    let updated_json =
-        serde_json::to_string_pretty(&instance_config).map_err(|e| e.to_string())?;
-    std::fs::write(&config_path, updated_json).map_err(|e| e.to_string())?;
-
-    app.emit(
-        "game-launched",
-        GameLaunchPayload {
-            instance_name: instance_name.clone(),
-            pid,
-            info: format!(
-                "IsoCraft: [{}] PID {} ({}, Java {})",
-                instance_name, pid, version_id, java_major
-            ),
-        },
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Hilo monitor: detecta cuando se cierra el juego
-    let app_clone = app.clone();
-    let name_clone = instance_name.clone();
+fn monitor_process(app: AppHandle, name: String, child_arc: Arc<Mutex<std::process::Child>>) {
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let mut guard = child_arc.lock().unwrap();
         match guard.try_wait() {
             Ok(Some(status)) => {
-                println!("[IsoCraft] Juego '{}' cerrado: {}", name_clone, status);
-                let state = app_clone.state::<GameState>();
-                if let Ok(mut g) = state.child_processes.lock() {
-                    g.remove(&name_clone);
-                }
-                let _ = app_clone.emit("game-closed", name_clone);
+                println!("[IsoCraft] Game '{}' closed with status: {}", name, status);
+                let state = app.state::<GameState>();
+                if let Ok(mut g) = state.child_processes.lock() { g.remove(&name); }
+                let _ = app.emit("game-closed", name);
                 break;
             }
             Ok(None) => {}
-            Err(e) => {
-                println!("[IsoCraft] Error monitoreando '{}': {}", name_clone, e);
-                break;
-            }
+            Err(_) => break,
         }
     });
-
-    Ok(())
-}
-
-// ─── Helper ───────────────────────────────────────────────────────────────────
-
-fn emit_progress(
-    app: &AppHandle,
-    instance_name: &str,
-    progress: u32,
-    message: &str,
-) -> Result<(), String> {
-    app.emit(
-        "jre-progress",
-        ProgressPayload {
-            instance_name: instance_name.to_string(),
-            progress,
-            message: message.to_string(),
-        },
-    )
-    .map_err(|e| e.to_string())
 }

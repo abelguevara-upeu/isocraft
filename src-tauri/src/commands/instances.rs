@@ -1,55 +1,58 @@
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
-use crate::models::{InstanceConfig, VersionManifest};
-use crate::state::GameState;
+use crate::models::{InstanceConfig, VersionManifest, LoaderVersionMapping};
+use crate::launcher::{paths::LauncherPaths, managers, cache};
 
-// ─── Versiones ────────────────────────────────────────────────────────────────
+// ─── Versions ────────────────────────────────────────────────────────────────
 
-/// Descarga y retorna la lista de releases desde el manifiesto oficial de Mojang.
 #[tauri::command]
-pub async fn obtener_versiones() -> Result<Vec<String>, String> {
-    let url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
-    let resp = reqwest::get(url).await.map_err(|e| e.to_string())?;
-    let manifest: VersionManifest = resp.json().await.map_err(|e| e.to_string())?;
+pub async fn get_versions(loader: crate::models::ModLoader) -> Result<Vec<LoaderVersionMapping>, String> {
+    // 1. Fetch Mojang version list (cached 1h)
+    const MOJANG_URL: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+    let cache_path = cache::meta_dir().join("mojang-releases.json");
+    let raw = cache::fetch_cached(MOJANG_URL, &cache_path, cache::TTL_1H).await?;
+    let manifest: VersionManifest = serde_json::from_value(raw).map_err(|e| e.to_string())?;
 
-    let releases = manifest
+    let releases: Vec<String> = manifest
         .versions
         .into_iter()
         .filter(|v| v.version_type == "release")
         .map(|v| v.id)
         .collect();
 
-    Ok(releases)
+    // 2. Delegate filtering and mapping to the corresponding manager
+    let manager = managers::get_manager(&loader);
+    manager.filter_compatible_versions(releases).await
 }
 
-// ─── Ciclo de vida de instancias ──────────────────────────────────────────────
+// ─── Instance Lifecycle ───────────────────────────────────────────────────────
 
-/// Crea una nueva instancia aislada con su directorio y archivo `instance.json`.
 #[tauri::command]
-pub async fn crear_instancia(
+pub async fn create_instance(
     app: AppHandle,
     name: String,
     version_id: String,
+    loader: crate::models::ModLoader,
+    loader_version: String,
     username: String,
     max_memory: String,
 ) -> Result<InstanceConfig, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let instance_dir = app_data_dir.join("instances").join(&name);
+    let paths = LauncherPaths::new(&app)?;
+    let instance_dir = paths.instance_dir(&name);
 
     if instance_dir.exists() {
-        return Err(format!("La instancia '{}' ya existe", name));
+        return Err(format!("Instance '{}' already exists", name));
     }
 
     std::fs::create_dir_all(&instance_dir).map_err(|e| e.to_string())?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
 
     let config = InstanceConfig {
         name,
         version_id,
+        loader,
+        loader_version,
         created_at: now.to_string(),
         last_played: None,
         max_memory,
@@ -62,25 +65,21 @@ pub async fn crear_instancia(
     Ok(config)
 }
 
-/// Lista todas las instancias ordenadas por `last_played` descendente.
 #[tauri::command]
-pub async fn listar_instancias(app: AppHandle) -> Result<Vec<InstanceConfig>, String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let instances_dir = app_data_dir.join("instances");
+pub async fn list_instances(app: AppHandle) -> Result<Vec<InstanceConfig>, String> {
+    let paths = LauncherPaths::new(&app)?;
+    let instances_dir = paths.instances;
 
     if !instances_dir.exists() {
         return Ok(vec![]);
     }
 
     let mut instances = Vec::new();
-
     for entry in std::fs::read_dir(&instances_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let config_path = entry.path().join("instance.json");
-
         if config_path.exists() {
-            let content =
-                std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+            let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
             if let Ok(cfg) = serde_json::from_str::<InstanceConfig>(&content) {
                 instances.push(cfg);
             }
@@ -91,18 +90,18 @@ pub async fn listar_instancias(app: AppHandle) -> Result<Vec<InstanceConfig>, St
     Ok(instances)
 }
 
-/// Elimina una instancia: mata el proceso si está en ejecución, luego borra su directorio.
 #[tauri::command]
-pub async fn eliminar_instancia(app: AppHandle, name: String) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let instance_dir = app_data_dir.join("instances").join(&name);
+pub async fn delete_instance(app: AppHandle, name: String) -> Result<(), String> {
+    let paths = LauncherPaths::new(&app)?;
+    let instance_dir = paths.instance_dir(&name);
 
     if !instance_dir.exists() {
-        return Err(format!("La instancia '{}' no existe", name));
+        return Err(format!("Instance '{}' does not exist", name));
     }
 
-    // Matar proceso activo si lo hay
     {
+        use tauri::Manager;
+        use crate::state::GameState;
         let state = app.state::<GameState>();
         let mut guard = state.child_processes.lock().unwrap();
         if let Some(child_arc) = guard.remove(&name) {
@@ -115,33 +114,23 @@ pub async fn eliminar_instancia(app: AppHandle, name: String) -> Result<(), Stri
     Ok(())
 }
 
-/// Abre el directorio de la instancia en el explorador de archivos del SO.
 #[tauri::command]
-pub async fn abrir_carpeta_instancia(app: AppHandle, name: String) -> Result<(), String> {
-    let app_data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let instance_dir = app_data_dir.join("instances").join(&name);
+pub async fn open_instance_folder(app: AppHandle, name: String) -> Result<(), String> {
+    let paths = LauncherPaths::new(&app)?;
+    let instance_dir = paths.instance_dir(&name);
 
     if !instance_dir.exists() {
-        return Err(format!("La instancia '{}' no existe", name));
+        return Err(format!("Instance '{}' does not exist", name));
     }
 
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open")
-        .arg(&instance_dir)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    std::process::Command::new("open").arg(&instance_dir).spawn().map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer")
-        .arg(&instance_dir)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer").arg(&instance_dir).spawn().map_err(|e| e.to_string())?;
 
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open")
-        .arg(&instance_dir)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    std::process::Command::new("xdg-open").arg(&instance_dir).spawn().map_err(|e| e.to_string())?;
 
     Ok(())
 }

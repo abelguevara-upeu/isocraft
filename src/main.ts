@@ -1,5 +1,10 @@
-import "./index.css";
 import { createApp } from "vue";
 import App from "./App.vue";
 
-createApp(App).mount("#app");
+import "./index.css";
+
+const app = createApp(App);
+
+// Future global configurations (pinia, router, etc) can go here
+
+app.mount("#app");

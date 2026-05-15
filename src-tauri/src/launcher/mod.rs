@@ -1,6 +1,13 @@
 pub mod args;
 pub mod assets;
+pub mod cache;
 pub mod game;
 pub mod jre;
 pub mod libraries;
 pub mod natives;
+pub mod utils;
+pub mod paths;
+pub mod managers;
+pub mod context;
+pub mod warnings;
+pub mod download;

@@ -16,11 +16,12 @@ pub struct VersionEntry {
     pub url: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VersionDetail {
     #[serde(rename = "javaVersion")]
     pub java_version: Option<JavaVersion>,
-    pub downloads: VersionDownloads,
+    #[serde(default)]
+    pub downloads: Option<VersionDownloads>,
     pub libraries: Vec<LibraryEntry>,
     #[serde(default)]
     pub assets: Option<String>,
@@ -36,7 +37,7 @@ pub struct VersionDetail {
     pub arguments: Option<ArgumentsSpec>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ArgumentsSpec {
     #[serde(default)]
     pub game: Vec<serde_json::Value>,
@@ -44,47 +45,66 @@ pub struct ArgumentsSpec {
     pub jvm: Vec<serde_json::Value>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AssetIndexInfo {
     pub id: String,
     pub url: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VersionDownloads {
     pub client: DownloadInfo,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DownloadInfo {
     pub url: String,
     pub size: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LibraryEntry {
     pub downloads: Option<LibraryDownloads>,
     pub name: String,
     #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
     pub natives: Option<HashMap<String, String>>,
+    /// OS rules (new format used in 1.19.x+ for platform-specific libraries)
+    #[serde(default)]
+    pub rules: Vec<LibraryRule>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+pub struct LibraryRule {
+    pub action: String,
+    #[serde(default)]
+    pub os: Option<LibraryRuleOs>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LibraryRuleOs {
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct LibraryDownloads {
     pub artifact: Option<Artifact>,
     #[serde(default)]
     pub classifiers: Option<HashMap<String, Artifact>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Artifact {
-    pub path: String,
+    #[serde(default)]
+    pub path: Option<String>,
     #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub size: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct JavaVersion {
     pub component: String,
     #[serde(rename = "majorVersion")]
@@ -109,10 +129,35 @@ pub struct GameLaunchPayload {
 
 // ─── Instance config ─────────────────────────────────────────────────────────
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum ModLoader {
+    Vanilla,
+    Fabric,
+    Forge,
+    NeoForge,
+}
+
+impl Default for ModLoader {
+    fn default() -> Self {
+        Self::Vanilla
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct LoaderVersionMapping {
+    pub minecraft: String,
+    pub loader: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct InstanceConfig {
     pub name: String,
     pub version_id: String,
+    #[serde(default)]
+    pub loader: ModLoader,
+    /// The exact version of the Mod Loader (e.g., Fabric 0.15.11, NeoForge 26.1.2.31)
+    #[serde(default)]
+    pub loader_version: String,
     pub created_at: String,
     pub last_played: Option<String>,
     pub max_memory: String,
