@@ -75,6 +75,8 @@ pub async fn launch_instance(
     // 5. Natives
     #[cfg(target_os = "macos")]
     let is_modern = detail.arguments.is_some();
+    #[cfg(not(target_os = "macos"))]
+    let is_modern = false;
 
     let natives_dir = if cfg!(target_os = "macos") && is_modern {
         // For modern macOS, we rely on LWJGL internal extraction from classpath

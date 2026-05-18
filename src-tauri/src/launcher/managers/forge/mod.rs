@@ -67,15 +67,15 @@ impl ModLoaderManager for ForgeManager {
     async fn apply_launch_patches(
         &self,
         _ctx: &LauncherContext,
-        cmd: &mut Command,
+        _cmd: &mut Command,
         _detail: &VersionDetail,
         _ph: &HashMap<String, String>,
     ) -> Result<(), String> {
         // Shared MacOS crash fix
         #[cfg(target_os = "macos")]
         {
-            cmd.arg("-Dforge.earlyWindow=false");
-            cmd.arg("-Dforge.earlywindow=false");
+            _cmd.arg("-Dforge.earlyWindow=false");
+            _cmd.arg("-Dforge.earlywindow=false");
         }
 
         // Era specific patches (like JRE overrides if needed at launch time)
