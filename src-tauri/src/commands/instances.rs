@@ -134,3 +134,65 @@ pub async fn open_instance_folder(app: AppHandle, name: String) -> Result<(), St
 
     Ok(())
 }
+
+#[tauri::command]
+pub async fn update_instance(
+    app: AppHandle,
+    current_name: String,
+    new_name: String,
+    version_id: String,
+    loader: crate::models::ModLoader,
+    loader_version: String,
+    username: String,
+    max_memory: String,
+) -> Result<InstanceConfig, String> {
+    let paths = LauncherPaths::new(&app)?;
+    let current_dir = paths.instance_dir(&current_name);
+
+    if !current_dir.exists() {
+        return Err(format!("Instance '{}' does not exist", current_name));
+    }
+
+    // Check if game is currently running
+    {
+        use tauri::Manager;
+        use crate::state::GameState;
+        let state = app.state::<GameState>();
+        let guard = state.child_processes.lock().unwrap();
+        if guard.contains_key(&current_name) {
+            return Err("Cannot modify instance while the game is running".to_string());
+        }
+    }
+
+    // Handle renaming
+    let final_dir = if current_name != new_name {
+        let target_dir = paths.instance_dir(&new_name);
+        if target_dir.exists() {
+            return Err(format!("An instance named '{}' already exists", new_name));
+        }
+
+        std::fs::rename(&current_dir, &target_dir)
+            .map_err(|e| format!("Failed to rename instance directory: {}", e))?;
+        target_dir
+    } else {
+        current_dir
+    };
+
+    let config_path = final_dir.join("instance.json");
+    let content = std::fs::read_to_string(&config_path).map_err(|e| e.to_string())?;
+    let mut config: InstanceConfig = serde_json::from_str(&content).map_err(|e| e.to_string())?;
+
+    // Update config fields
+    config.name = new_name;
+    config.version_id = version_id;
+    config.loader = loader;
+    config.loader_version = loader_version;
+    config.username = username;
+    config.max_memory = max_memory;
+
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, json).map_err(|e| e.to_string())?;
+
+    Ok(config)
+}
+

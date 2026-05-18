@@ -46,6 +46,18 @@ export const InstanceService = {
     return await invoke("delete_instance", { name });
   },
 
+  async updateInstance(currentName: string, config: Partial<InstanceConfig>): Promise<InstanceConfig> {
+    return await invoke("update_instance", {
+      currentName,
+      newName: config.name,
+      versionId: config.version_id,
+      loader: config.loader,
+      loaderVersion: config.loader_version,
+      username: config.username,
+      maxMemory: config.max_memory
+    });
+  },
+
   async openFolder(name: string): Promise<void> {
     return await invoke("open_instance_folder", { name });
   }
@@ -70,5 +82,33 @@ export const FileService = {
   /** Accepts a file path OR a folder path. Returns how many were imported vs skipped (duplicates). */
   async importPath(instanceName: string, folder: string, sourcePath: string): Promise<ImportResult> {
     return await invoke<ImportResult>("import_path", { instanceName, folder, sourcePath });
+  },
+
+  async deleteFile(instanceName: string, folder: string, fileName: string): Promise<void> {
+    return await invoke("delete_file", { instanceName, folder, fileName });
+  },
+
+  async listSaves(instanceName: string): Promise<string[]> {
+    return await invoke("list_saves", { instanceName });
+  },
+
+  async deleteSave(instanceName: string, saveName: string): Promise<void> {
+    return await invoke("delete_save", { instanceName, saveName });
+  },
+
+  async openInSystem(instanceName: string, subPath: string): Promise<void> {
+    return await invoke("open_in_system", { instanceName, subPath });
+  },
+
+  async listDatapacks(instanceName: string, worldName: string): Promise<string[]> {
+    return await invoke("list_datapacks", { instanceName, worldName });
+  },
+
+  async deleteDatapack(instanceName: string, worldName: string, datapackName: string): Promise<void> {
+    return await invoke("delete_datapack", { instanceName, worldName, datapackName });
+  },
+
+  async importDatapack(instanceName: string, worldName: string, sourcePath: string): Promise<void> {
+    return await invoke("import_datapack", { instanceName, worldName, sourcePath });
   }
 };

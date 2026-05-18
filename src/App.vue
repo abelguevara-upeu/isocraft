@@ -21,6 +21,9 @@
         @delete="handleDelete"
         @open-folder="openInstanceFolder"
         @tab-change="handleTabChange"
+        @edit="openEditModal"
+        @delete-file="deleteFile"
+        @update-instance="updateInstance"
       />
 
       <!-- Empty State -->
@@ -44,6 +47,16 @@
       :loading-versions="isLoadingVersions"
       @close="showCreateModal = false"
       @create="createInstance"
+      @change-loader="loadVersions"
+    />
+
+    <EditInstanceModal 
+      v-if="showEditModal && selectedInstance"
+      :instance="selectedInstance"
+      :versions="availableVersions"
+      :loading-versions="isLoadingVersions"
+      @close="showEditModal = false"
+      @save="updateInstance"
       @change-loader="loadVersions"
     />
 
@@ -84,6 +97,7 @@ import { ask, message } from '@tauri-apps/plugin-dialog';
 import Sidebar from './components/Sidebar.vue';
 import InstanceDetails from './components/InstanceDetails.vue';
 import CreateInstanceModal from './components/CreateInstanceModal.vue';
+import EditInstanceModal from './components/EditInstanceModal.vue';
 
 // Services
 import { InstanceService, LauncherService, FileService, type InstanceConfig, type LoaderVersionMapping } from './services/api';
@@ -94,6 +108,7 @@ const selectedInstance = ref<InstanceConfig | null>(null);
 const availableVersions = ref<LoaderVersionMapping[]>([]);
 const isLoadingVersions = ref(true);
 const showCreateModal = ref(false);
+const showEditModal = ref(false);
 const activeTab = ref('general');
 const filesList = ref<string[]>([]);
 const isDragging = ref(false);
@@ -227,6 +242,44 @@ async function createInstance(data: any) {
     showCreateModal.value = false;
   } catch (e) {
     await message(String(e), { title: 'Creation Error', kind: 'error' });
+  }
+}
+
+function openEditModal() {
+  showEditModal.value = true;
+}
+
+async function updateInstance(data: any) {
+  if (!selectedInstance.value) return;
+  const currentName = selectedInstance.value.name;
+  try {
+    const updated = await InstanceService.updateInstance(currentName, data);
+    
+    // Update local list
+    instances.value = instances.value.map(i => i.name === currentName ? updated : i);
+    selectedInstance.value = updated;
+    showEditModal.value = false;
+  } catch (e) {
+    await message(String(e), { title: 'Update Error', kind: 'error' });
+  }
+}
+
+async function deleteFile(fileName: string) {
+  if (!selectedInstance.value) return;
+  const name = selectedInstance.value.name;
+  
+  const confirmed = await ask(`Are you sure you want to delete the file "${fileName}"? This cannot be undone.`, {
+    title: 'Confirm Deletion',
+    kind: 'warning'
+  });
+
+  if (!confirmed) return;
+
+  try {
+    await FileService.deleteFile(name, activeTab.value, fileName);
+    await loadFiles(); // Reload file list
+  } catch (e) {
+    await message(String(e), { title: 'Delete Error', kind: 'error' });
   }
 }
 

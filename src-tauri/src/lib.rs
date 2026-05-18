@@ -4,10 +4,13 @@ mod models;
 mod state;
 
 use commands::{
-    files::{import_path, list_files},
+    files::{
+        import_path, list_files, delete_file, list_saves, delete_save, open_in_system,
+        list_datapacks, delete_datapack, import_datapack
+    },
     instances::{
         open_instance_folder, create_instance, delete_instance, list_instances,
-        get_versions,
+        get_versions, update_instance,
     },
     launcher::launch_instance,
 };
@@ -30,6 +33,14 @@ pub fn run() {
             list_files,
             import_path,
             launch_instance,
+            update_instance,
+            delete_file,
+            list_saves,
+            delete_save,
+            open_in_system,
+            list_datapacks,
+            delete_datapack,
+            import_datapack,
         ])
         .build(tauri::generate_context!())
         .expect("Error starting IsoCraft")
