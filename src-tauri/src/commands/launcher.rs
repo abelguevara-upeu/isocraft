@@ -38,6 +38,21 @@ pub async fn launch_instance(
     // 3. Resolve Manifest
     ctx.emit_progress(5, "Resolving manifest...");
     let vanilla_manifest = fetch_vanilla_manifest(&ctx, &instance_config.version_id).await?;
+
+    // Pre-download Vanilla JAR and save Vanilla JSON to versions/ directory (required for installer env spoofing)
+    let vanilla_dir = ctx.paths.root.join("versions").join(&instance_config.version_id);
+    std::fs::create_dir_all(&vanilla_dir).map_err(|e| format!("Failed to create vanilla directory: {}", e))?;
+
+    let vanilla_json_path = vanilla_dir.join(format!("{}.json", instance_config.version_id));
+    let vanilla_json_str = serde_json::to_string_pretty(&vanilla_manifest).map_err(|e| e.to_string())?;
+    std::fs::write(&vanilla_json_path, vanilla_json_str).map_err(|e| format!("Failed to write vanilla JSON: {}", e))?;
+
+    let vanilla_detail: crate::models::VersionDetail = serde_json::from_value(vanilla_manifest.clone())
+        .map_err(|e| format!("Failed to parse vanilla manifest: {}", e))?;
+    if let Some(ref downloads) = vanilla_detail.downloads {
+        game::ensure_game_jar(&ctx, &instance_config.version_id, &downloads.client).await?;
+    }
+
     let manager = managers::get_manager(&instance_config.loader);
     let detail = manager.resolve_manifest(&instance_config.version_id, &instance_config.loader_version, vanilla_manifest, &ctx).await?;
 
