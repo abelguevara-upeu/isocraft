@@ -81,9 +81,9 @@ impl HeadlessInstaller {
             extract::copy_dir_all(generated_libs, &ctx.paths.libraries).map_err(|e| e.to_string())?;
         }
 
-        // Find the generated version.json (it might have a different name in the temp dir)
+        // Find the generated version.json (skip the vanilla mc_version dir we spoofed)
         let search_dir = temp_dir.join("versions");
-        let found_json = find_json_recursive(&search_dir);
+        let found_json = find_json_recursive(&search_dir, mc_version);
         
         if let Some(json_path) = found_json {
             std::fs::create_dir_all(target_version_dir).map_err(|e| e.to_string())?;
@@ -99,14 +99,17 @@ impl HeadlessInstaller {
     }
 }
 
-fn find_json_recursive(dir: &Path) -> Option<PathBuf> {
+fn find_json_recursive(dir: &Path, skip_dirname: &str) -> Option<PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                if let Some(p) = find_json_recursive(&path) { return Some(p); }
+                // Skip the spoofed vanilla version directory
+                if path.file_name().and_then(|n| n.to_str()) == Some(skip_dirname) {
+                    continue;
+                }
+                if let Some(p) = find_json_recursive(&path, skip_dirname) { return Some(p); }
             } else if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                // Return the first JSON found in the versions subfolders
                 return Some(path);
             }
         }
