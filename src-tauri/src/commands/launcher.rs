@@ -154,6 +154,12 @@ pub async fn launch_instance(
     let mut cmd = Command::new(&java_exe);
     cmd.current_dir(std::path::Path::new(&instance_dir_str));
 
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+
     #[cfg(target_os = "macos")]
     {
         // Minimal set for macOS
