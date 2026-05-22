@@ -112,3 +112,14 @@ export const FileService = {
     return await invoke("import_datapack", { instanceName, worldName, sourcePath });
   }
 };
+
+export const ModpackService = {
+  async importModpack(sourcePath: string, instanceName: string, username: string, maxMemory: string): Promise<InstanceConfig> {
+    return await invoke("import_modpack", {
+      sourcePath,
+      instanceName,
+      username,
+      maxMemory,
+    });
+  }
+};

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tauri::{AppHandle, Manager};
+use tauri::Manager;
 
 /// Centralized path manager for IsoCraft.
 #[derive(Clone)]
@@ -13,7 +13,7 @@ pub struct LauncherPaths {
 
 impl LauncherPaths {
     /// Creates a new instance of LauncherPaths, initializing the root directory.
-    pub fn new(app: &AppHandle) -> Result<Self, String> {
+    pub fn new<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Self, String> {
         let home = app.path().home_dir().map_err(|e| e.to_string())?;
         let root = home.join(".isocraft");
 

@@ -33,3 +33,6 @@ tauri-plugin-dialog = "2.7.0"
 tauri-plugin-fs = "2.5.0"
 async-trait = "0.1.89"
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+

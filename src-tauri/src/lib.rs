@@ -13,6 +13,7 @@ use commands::{
         get_versions, update_instance,
     },
     launcher::launch_instance,
+    modpack::import_modpack,
 };
 use state::GameState;
 use tauri::Manager;
@@ -41,6 +42,7 @@ pub fn run() {
             list_datapacks,
             delete_datapack,
             import_datapack,
+            import_modpack,
         ])
         .build(tauri::generate_context!())
         .expect("Error starting IsoCraft")

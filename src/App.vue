@@ -47,6 +47,7 @@
       :loading-versions="isLoadingVersions"
       @close="showCreateModal = false"
       @create="createInstance"
+      @created-instance="handleInstanceCreated"
       @change-loader="loadVersions"
     />
 
@@ -243,6 +244,12 @@ async function createInstance(data: any) {
   } catch (e) {
     await message(String(e), { title: 'Creation Error', kind: 'error' });
   }
+}
+
+async function handleInstanceCreated(created: InstanceConfig) {
+  instances.value.unshift(created);
+  selectedInstance.value = created;
+  showCreateModal.value = false;
 }
 
 function openEditModal() {
